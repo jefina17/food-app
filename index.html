@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sizzle & Serve: Accessible Food App</title>
+    
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom Styles for a modern look */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f9fafb; /* Light gray background */
+        }
+        
+        .card-shadow {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        /* Responsive Cart Toggle on Mobile */
+        @media (max-width: 1023px) {
+            .cart-container-mobile-hidden {
+                display: none;
+            }
+        }
+    </style>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, getDocs, onSnapshot, updateDoc, deleteDoc, setDoc, query, where, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Set log level to Debug for Firestore
+        setLogLevel('Debug');
+
+        // --- GLOBAL STATE & CONFIG ---\
+        // Fallback for when __app_id and __firebase_config are not provided (e.g., Live Server)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-food-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let db, auth, userId, app;
+        let currentCart = []; // Local cache for cart
+        let allMenuItems = []; // Local cache for menu
+        let isFirebaseActive = false; // Flag to check if we connected successfully
+
+        // Fallback Menu Data for local testing (FIX FOR LIVE SERVER)
+        const LOCAL_MENU_DATA = [
+            { id: "biryani-1", name: "Chicken Biryani", price: 250, description: "Aromatic basmati rice cooked with succulent chicken pieces and spices.", image: "biryani image.jpg" },
+            { id: "dosa-2", name: "Masala Dosa", price: 80, description: "Crispy crepe filled with spicy potato mash.", image: "Dosa-Recipe-2.jpg" },
+            { id: "idly-3", name: "Idli Sambar", price: 60, description: "Soft steamed rice cakes served with lentil stew.", image: "idlly image.webp" },
+            { id: "chapatti-4", name: "Chapatti & Curry", price: 120, description: "Whole wheat flatbread served with daily vegetable curry.", image: "chapatti-plus.webp" },
+            { id: "fried-5", name: "Veg Fried Rice", price: 180, description: "Stir-fried rice with mixed vegetables and sauces.", image: "fried imgae.jpg" },
+            { id: "parotta-6", name: "Kerala Parotta", price: 70, description: "Flaky, layered flatbread served with gravy.", image: "parotta imgae.jpg" },
+            { id: "coffee-7", name: "Filter Coffee", price: 40, description: "South Indian filter coffee, strong and milky.", image: "coffe image.jpg" },
+            { id: "donut-8", name: "Chocolate Doughnut", price: 90, description: "Sweet glazed doughnut with chocolate drizzle.", image: "doodles imgae.jpg" }
+        ];
+
+        // Check for Speech Recognition and Synthesis APIs
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const synthesis = window.speechSynthesis;
+        let recognition;
+        let isVoiceListening = false;
+        
+        // --- DOM ELEMENTS ---\
+        const menuContainer = document.getElementById('menu-container');
+        const cartItemsContainer = document.getElementById('cart-items');
+        const cartTotalDisplay = document.getElementById('cart-total');
+        const checkoutBtn = document.getElementById('checkout-button');
+        const voiceToggleBtn = document.getElementById('voice-toggle');
+        const voiceStatusDisplay = document.getElementById('voice-status');
+        const messageBox = document.getElementById('message-box');
+        const cartContainer = document.getElementById('cart-container');
+        const mobileCartBtn = document.getElementById('mobile-cart-toggle');
+        const cartCountBadge = document.getElementById('cart-count-badge');
+
+
+        // --- FIREBASE INITIALIZATION & AUTH ---\
+        async function initializeFirebase() {
+            if (firebaseConfig) {
+                try {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                        console.log("Signed in with custom token.");
+                    } else {
+                        await signInAnonymously(auth);
+                        console.log("Signed in anonymously.");
+                    }
+                    isFirebaseActive = true;
+                    
+                } catch (error) {
+                    console.error("Firebase Auth/Init Error: Using local data.", error);
+                    showMessage('Firebase connection failed. Using local menu data.', 'error');
+                    isFirebaseActive = false;
+                }
+            } else {
+                console.warn("Firebase config is missing. Using local menu data.");
+                isFirebaseActive = false;
+            }
+
+            // Handle auth state change *only* if Firebase is active
+            if (isFirebaseActive) {
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                        fetchMenuAndCart();
+                        setupSpeechRecognition();
+                    } else {
+                        userId = null;
+                        document.getElementById('user-id-display').textContent = 'User ID: N/A (Logged Out)';
+                        showMessage('Please refresh to log in or use anonymously.', 'error');
+                    }
+                });
+            } else {
+                // FALLBACK for Local Server: Use hardcoded menu and anonymous user
+                userId = crypto.randomUUID();
+                allMenuItems = LOCAL_MENU_DATA;
+                displayMenu();
+                setupSpeechRecognition();
+                document.getElementById('user-id-display').textContent = `Local Mode ID: ${userId.substring(0, 8)}...`;
+            }
+        }
+
+        // --- FIRESTORE UTILITIES (Only used if isFirebaseActive is true) ---\
+
+        function getCartCollectionRef(uid) {
+             return collection(db, `artifacts/${appId}/users/${uid}/cartItems`);
+        }
+
+        function getMenuCollectionRef() {
+            return collection(db, `artifacts/${appId}/public/data/menuItems`);
+        }
+        
+        // --- MENU AND CART OPERATIONS ---\
+
+        function formatPrice(price) {
+            return `₹${price.toFixed(2)}`;
+        }
+
+        // Function to create or update menu items (admin side, run once)
+        async function seedMenu() {
+            if (!db || !isFirebaseActive) return;
+            
+            const menuRef = getMenuCollectionRef();
+            try {
+                // Check if menu exists, only seed if collection is empty
+                const snapshot = await getDocs(menuRef);
+                if (snapshot.empty) {
+                    console.log("Seeding menu items...");
+                    for (const item of LOCAL_MENU_DATA) {
+                        await setDoc(doc(menuRef, item.id), item);
+                    }
+                    console.log("Menu seeding complete.");
+                }
+            } catch (e) {
+                console.error("Error seeding menu: ", e);
+            }
+        }
+        
+        function displayMenu() {
+            menuContainer.innerHTML = '';
+            if (allMenuItems.length === 0) {
+                menuContainer.innerHTML = `<p class="text-center text-gray-500 col-span-full py-10">Loading menu...</p>`;
+                return;
+            }
+
+            allMenuItems.forEach(item => {
+                const menuItem = document.createElement('div');
+                menuItem.className = 'menu-item bg-white rounded-xl shadow-lg hover:shadow-xl transition duration-300 p-4 flex flex-col cursor-pointer card-shadow';
+                menuItem.setAttribute('data-id', item.id);
+                menuItem.setAttribute('aria-label', `${item.name}, price ${item.price} rupees`);
+                // Use a non-async wrapper if Firebase is inactive
+                menuItem.onclick = isFirebaseActive ? () => addItemToCart(item.id) : () => addLocalItemToCart(item.id);
+
+                // Use placeholder image if the filename is not known to be available, otherwise use the filename
+                const imageUrl = item.image;
+                const placeholderUrl = `https://placehold.co/400x250/f0f0f0/6b7280?text=${item.name.replace(/ /g, '+')}`;
+
+                menuItem.innerHTML = `
+                    <img src="${imageUrl}" alt="${item.name}" class="w-full h-36 object-cover rounded-lg mb-3" onerror="this.onerror=null;this.src='${placeholderUrl}';">
+                    <h3 class="text-xl font-bold text-gray-900 mb-1">${item.name}</h3>
+                    <p class="text-rose-600 font-extrabold text-2xl mb-3">${formatPrice(item.price)}</p>
+                    <p class="text-gray-500 text-sm flex-grow mb-4">${item.description}</p>
+                    <button class="bg-rose-600 text-white py-2 rounded-full font-semibold hover:bg-rose-700 transition shadow-md w-full" aria-label="Add ${item.name} to cart">
+                        Add to Cart
+                    </button>
+                `;
+                menuContainer.appendChild(menuItem);
+            });
+        }
+
+        function updateCartUI() {
+            cartItemsContainer.innerHTML = '';
+            let total = 0;
+            const itemsMap = {}; 
+
+            currentCart.forEach(item => {
+                const menu = allMenuItems.find(m => m.id === item.menuId);
+                if (!menu) return;
+
+                if (itemsMap[item.menuId]) {
+                    itemsMap[item.menuId].quantity += 1;
+                } else {
+                    itemsMap[item.menuId] = {
+                        ...item,
+                        name: menu.name,
+                        price: menu.price,
+                        quantity: 1
+                    };
+                }
+                total += item.price;
+            });
+            
+            Object.values(itemsMap).forEach(item => {
+                const cartItem = document.createElement('div');
+                cartItem.className = 'flex justify-between items-center py-3 border-b border-gray-100 last:border-b-0';
+                
+                // Use different update functions based on Firebase activity
+                const updateFunction = isFirebaseActive ? 'updateCartQuantity' : 'updateLocalCartQuantity';
+
+                cartItem.innerHTML = `
+                    <div class="flex-grow">
+                        <p class="font-semibold text-gray-800">${item.name}</p>
+                        <p class="text-sm text-gray-500">${item.quantity} x ${formatPrice(item.price)}</p>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <button onclick="${updateFunction}('${item.menuId}', -1)" class="text-rose-600 hover:text-rose-800 font-bold p-1 rounded-full border border-rose-600 hover:bg-rose-50 transition" aria-label="Decrease quantity of ${item.name}">-</button>
+                        <span class="font-bold text-gray-900 w-4 text-center">${item.quantity}</span>
+                        <button onclick="${updateFunction}('${item.menuId}', 1)" class="text-rose-600 hover:text-rose-800 font-bold p-1 rounded-full border border-rose-600 hover:bg-rose-50 transition" aria-label="Increase quantity of ${item.name}">+</button>
+                    </div>
+                `;
+                cartItemsContainer.appendChild(cartItem);
+            });
+            
+            cartTotalDisplay.textContent = formatPrice(total);
+            checkoutBtn.disabled = total === 0;
+            checkoutBtn.classList.toggle('opacity-50', total === 0);
+            
+            // Update mobile cart badge
+            const totalItems = currentCart.length;
+            cartCountBadge.textContent = totalItems;
+            cartCountBadge.classList.toggle('hidden', totalItems === 0);
+        }
+
+        // --- FIREBASE CART FUNCTIONS (used in Canvas) ---
+        window.addItemToCart = async function(menuId) {
+            if (!isFirebaseActive || !userId) { showMessage('Please wait for user authentication to complete.', 'error'); return; }
+
+            const menuItem = allMenuItems.find(item => item.id === menuId);
+            if (!menuItem) { showMessage('Item not found!', 'error'); return; }
+
+            try {
+                const newItem = {
+                    menuId: menuId,
+                    price: menuItem.price,
+                    timestamp: serverTimestamp()
+                };
+                await addDoc(getCartCollectionRef(userId), newItem);
+                speak(`Added ${menuItem.name} to cart.`);
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showMessage('Failed to add item to cart.', 'error');
+            }
+        }
+        
+        window.updateCartQuantity = async function(menuId, change) {
+            if (!isFirebaseActive || !userId) return;
+
+            // Find all instances of this menu item in the cart
+            const items = currentCart.filter(item => item.menuId === menuId);
+            const menuItem = allMenuItems.find(m => m.id === menuId);
+            if (!menuItem) return;
+            
+            if (change === 1) {
+                // Add one more
+                await addDoc(getCartCollectionRef(userId), {
+                    menuId: menuItem.id,
+                    price: menuItem.price,
+                    timestamp: serverTimestamp()
+                });
+                speak(`Added one more item.`);
+                
+            } else if (change === -1) {
+                // Remove one instance (requires querying to find the specific doc ID)
+                if (items.length > 0) {
+                    // Because we don't have the doc ID easily, we need a query to find one to delete.
+                    // However, we rely on the onSnapshot to keep currentCart updated.
+                    // The simplest way to get the oldest (or newest) doc is to check the cache.
+                    const itemToRemove = currentCart.find(item => item.menuId === menuId); 
+                    if (itemToRemove) {
+                         await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/cartItems`, itemToRemove.id));
+                         speak(`Removed one item.`);
+                    }
+                }
+            }
+        }
+
+        window.clearCart = async function() {
+            if (!isFirebaseActive || !userId) return;
+            if (currentCart.length === 0) return;
+
+            const total = currentCart.reduce((sum, item) => sum + item.price, 0);
+
+            // Using a simple confirmation for now, but should be replaced by a custom modal
+            if (confirm(`Are you sure you want to clear the entire cart? Total: ${formatPrice(total)}`)) {
+                const batch = db.batch();
+                currentCart.forEach(item => {
+                    batch.delete(doc(db, `artifacts/${appId}/users/${userId}/cartItems`, item.id));
+                });
+
+                try {
+                    await batch.commit();
+                    speak('Cart cleared.');
+                    closePaymentModal();
+                } catch (e) {
+                    console.error("Error clearing cart: ", e);
+                    showMessage('Failed to clear cart.', 'error');
+                }
+            } else {
+                 showMessage('Cart clear cancelled.', 'info');
+            }
+        }
+
+        function fetchMenuAndCart() {
+            if (!isFirebaseActive || !db || !userId) return;
+            
+            // 1. Listen for Menu Items (Public data)
+            onSnapshot(getMenuCollectionRef(), (snapshot) => {
+                allMenuItems = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                displayMenu();
+                console.log("Menu loaded from Firestore.");
+            }, (error) => {
+                console.error("Error fetching menu from Firestore:", error);
+            });
+
+            // 2. Listen for Cart Items (User private data)
+            onSnapshot(getCartCollectionRef(userId), (snapshot) => {
+                currentCart = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                updateCartUI();
+                console.log("Cart updated from Firestore.");
+            }, (error) => {
+                console.error("Error fetching cart from Firestore:", error);
+            });
+        }
+        
+        // --- LOCAL CART FUNCTIONS (used in Live Server) ---
+        window.addLocalItemToCart = function(menuId) {
+            const menuItem = allMenuItems.find(item => item.id === menuId);
+            if (!menuItem) return;
+
+            // Simulate Firestore item structure with a temporary ID
+            const newItem = {
+                id: crypto.randomUUID(), // Unique ID for removal
+                menuId: menuId,
+                price: menuItem.price,
+                timestamp: Date.now()
+            };
+            currentCart.push(newItem);
+            updateCartUI();
+            speak(`Added ${menuItem.name} to cart.`);
+        }
+
+        window.updateLocalCartQuantity = function(menuId, change) {
+            if (change === 1) {
+                addLocalItemToCart(menuId);
+                speak(`Added one more item.`);
+            } else if (change === -1) {
+                // Find the index of the first item with this menuId
+                const indexToRemove = currentCart.findIndex(item => item.menuId === menuId);
+                if (indexToRemove !== -1) {
+                    currentCart.splice(indexToRemove, 1);
+                    updateCartUI();
+                    speak(`Removed one item.`);
+                }
+            }
+        }
+
+        window.clearLocalCart = function() {
+            if (currentCart.length === 0) return;
+
+            // Using a simple confirmation for now, but should be replaced by a custom modal
+            if (confirm('Are you sure you want to clear the entire cart?')) {
+                currentCart = [];
+                updateCartUI();
+                speak('Cart cleared.');
+                closePaymentModal();
+            }
+        }
+        
+        // --- SPEECH RECOGNITION & SYNTHESIS ---\
+
+        function setupSpeechRecognition() {
+            if (!SpeechRecognition) {
+                voiceToggleBtn.disabled = true;
+                voiceStatusDisplay.textContent = 'Voice not supported.';
+                // showMessage('Your browser does not support Speech Recognition.', 'error');
+                return;
+            }
+
+            recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            recognition.lang = 'en-US';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+
+            recognition.onresult = (event) => {
+                const speechResult = event.results[0][0].transcript.toLowerCase();
+                processVoiceCommand(speechResult);
+            };
+
+            recognition.onspeechend = () => {
+                stopListening();
+            };
+
+            recognition.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                // showMessage(`Voice error: ${event.error}`, 'error');
+                stopListening();
+            };
+            
+            recognition.onstart = () => {
+                isVoiceListening = true;
+                voiceStatusDisplay.textContent = 'Listening...';
+                voiceToggleBtn.classList.add('bg-rose-700', 'ring-4', 'ring-rose-300');
+                voiceToggleBtn.classList.remove('bg-rose-600');
+            };
+
+            recognition.onend = () => {
+                 // Check if it was manually stopped or ended naturally
+                 if (isVoiceListening) {
+                    stopListening();
+                 }
+            };
+        }
+        
+        window.toggleVoice = function() {
+            if (!recognition) return;
+
+            if (isVoiceListening) {
+                stopListening();
+            } else {
+                startListening();
+            }
+        }
+        
+        function startListening() {
+            try {
+                recognition.start();
+                speak('Ready for command.');
+                
+            } catch (e) {
+                console.error('Error starting recognition:', e);
+                // Catch error if recognition is already active
+            }
+        }
+        
+        function stopListening() {
+            if (isVoiceListening) {
+                isVoiceListening = false;
+                recognition.stop();
+                voiceStatusDisplay.textContent = 'Voice Control Off';
+                voiceToggleBtn.classList.remove('bg-rose-700', 'ring-4', 'ring-rose-300');
+                voiceToggleBtn.classList.add('bg-rose-600');
+            }
+        }
+
+        function speak(text) {
+            if (!synthesis) return;
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'en-US';
+            utterance.rate = 1.1; // Slightly faster
+            synthesis.speak(utterance);
+        }
+
+        function processVoiceCommand(command) {
+            console.log('Command received:', command);
+
+            // Determine which add/clear function to use
+            const addItemFunc = isFirebaseActive ? addItemToCart : addLocalItemToCart;
+            const clearCartFunc = isFirebaseActive ? clearCart : clearLocalCart;
+
+            if (command.includes('add') || command.includes('order')) {
+                const itemName = command.replace(/add|order|a|one/g, '').trim();
+                const matchedItem = allMenuItems.find(item => itemName.includes(item.name.toLowerCase()) || item.name.toLowerCase().includes(itemName));
+                
+                if (matchedItem) {
+                    addItemFunc(matchedItem.id);
+                } else {
+                    speak('Sorry, I couldn\'t find that item. Try saying "add chicken biryani".');
+                }
+            } else if (command.includes('checkout') || command.includes('pay')) {
+                openPaymentModal();
+            } else if (command.includes('clear cart') || command.includes('empty cart')) {
+                 clearCartFunc();
+            } else if (command.includes('read menu')) {
+                const menuList = allMenuItems.map(item => `${item.name} at ${formatPrice(item.price)}`).join(', ');
+                speak(`The menu includes: ${menuList}. Say "add" followed by the item name to order.`);
+            } else if (command.includes('what is my total')) {
+                const total = currentCart.reduce((sum, item) => sum + item.price, 0);
+                speak(`Your current total is ${formatPrice(total)}.`);
+            } else {
+                speak('Command not recognized. Try saying "add item name" or "checkout".');
+            }
+        }
+        
+        // --- MODAL & MESSAGE BOX UTILITIES ---\
+
+        function showMessage(text, type = 'info', duration = 3000) {
+            messageBox.textContent = text;
+            messageBox.classList.remove('hidden', 'bg-red-500', 'bg-blue-500', 'bg-green-500');
+            
+            let colorClass = 'bg-blue-500';
+            if (type === 'error') colorClass = 'bg-red-500';
+            if (type === 'success') colorClass = 'bg-green-500';
+            
+            messageBox.classList.add(colorClass);
+            messageBox.classList.add('opacity-100');
+
+            setTimeout(() => {
+                messageBox.classList.remove('opacity-100');
+                messageBox.classList.add('opacity-0');
+                setTimeout(() => messageBox.classList.add('hidden'), 500);
+            }, duration);
+            // Don't speak errors or info messages, only key confirmations
+            if (type === 'success') {
+                speak(text);
+            }
+        }
+
+        window.openPaymentModal = function() {
+            if (currentCart.length === 0) {
+                showMessage('Your cart is empty. Please add items before checking out.', 'info');
+                return;
+            }
+            // Update total in modal
+            const total = currentCart.reduce((sum, item) => sum + item.price, 0);
+            document.getElementById('payment-total').textContent = formatPrice(total);
+            document.getElementById('payment-modal').classList.remove('hidden');
+        }
+
+        window.closePaymentModal = function() {
+            document.getElementById('payment-modal').classList.add('hidden');
+        }
+
+        window.processPayment = async function() {
+            closePaymentModal();
+            showMessage('Payment successful! Preparing your order.', 'success');
+            
+            // Automatically show bill
+            setTimeout(() => {
+                printBill();
+            }, 1000);
+        }
+
+        window.printBill = function() {
+            const total = currentCart.reduce((sum, item) => sum + item.price, 0);
+            const itemsMap = {};
+            currentCart.forEach(item => {
+                const menu = allMenuItems.find(m => m.id === item.menuId);
+                if (menu) {
+                    if (itemsMap[menu.name]) {
+                        itemsMap[menu.name].quantity++;
+                        itemsMap[menu.name].total += menu.price;
+                    } else {
+                        itemsMap[menu.name] = { name: menu.name, price: menu.price, quantity: 1, total: menu.price };
+                    }
+                }
+            });
+
+            const billContent = document.getElementById('bill-content');
+            billContent.innerHTML = `
+                <div class="border-b border-dashed border-gray-400 py-2">
+                    <p class="text-xs text-center text-gray-500">Receipt ID: ${Math.random().toString(36).substring(2, 10).toUpperCase()}</p>
+                    <p class="text-xs text-center text-gray-500">Date: ${new Date().toLocaleDateString()}</p>
+                    <p class="text-xs text-center text-gray-500">Time: ${new Date().toLocaleTimeString()}</p>
+                </div>
+                <div class="py-2">
+                    <div class="flex justify-between font-bold text-xs mb-1">
+                        <span>Item</span>
+                        <span>Qty</span>
+                        <span>Amt</span>
+                    </div>
+                    ${Object.values(itemsMap).map(item => `
+                        <div class="flex justify-between text-sm py-1">
+                            <span class="w-1/2">${item.name}</span>
+                            <span class="w-1/4 text-center">${item.quantity}</span>
+                            <span class="w-1/4 text-right">${formatPrice(item.total)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+                <div class="border-t border-dashed border-gray-400 pt-3 mt-3">
+                    <div class="flex justify-between font-bold text-lg mb-1">
+                        <span>TOTAL:</span>
+                        <span>${formatPrice(total)}</span>
+                    </div>
+                    <p class="text-xs text-center mt-4 text-gray-600">Thank you for ordering with Sizzle & Serve!</p>
+                </div>
+            `;
+            
+            document.getElementById('bill-modal').classList.remove('hidden');
+            speak('Your order receipt is ready.');
+        }
+        
+        window.closeBillModal = async function() {
+            document.getElementById('bill-modal').classList.add('hidden');
+            
+            // Clear the cart after the bill is closed, using the appropriate function
+            if (currentCart.length > 0) {
+                 if (isFirebaseActive) {
+                    const batch = db.batch();
+                    currentCart.forEach(item => {
+                        batch.delete(doc(db, `artifacts/${appId}/users/${userId}/cartItems`, item.id));
+                    });
+                    await batch.commit();
+                 } else {
+                    currentCart = [];
+                    updateCartUI();
+                 }
+            }
+        }
+
+        window.toggleMobileCart = function() {
+            cartContainer.classList.toggle('cart-container-mobile-hidden');
+            const isOpen = !cartContainer.classList.contains('cart-container-mobile-hidden');
+            mobileCartBtn.innerHTML = isOpen ? 
+                '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg> Close Cart' :
+                '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"></path></svg> View Cart';
+
+            if (isOpen) {
+                speak('Cart opened.');
+            } else {
+                speak('Cart closed.');
+            }
+        }
+
+        // --- INITIALIZATION ---\
+        document.addEventListener('DOMContentLoaded', () => {
+            // This now initializes Firebase AND sets up the local fallback if it fails
+            initializeFirebase(); 
+            
+            // Seed the menu only once if running in the Canvas environment
+            if (isFirebaseActive && firebaseConfig) {
+                 seedMenu(); 
+            }
+        });
+        
+    </script>
+</head>
+
+<body class="min-h-screen bg-gray-50">
+
+    <!-- Global Message Box -->
+    <div id="message-box" class="fixed top-4 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-full text-white shadow-xl z-50 transition-opacity duration-500 opacity-0 hidden" role="alert" aria-live="polite">
+        Message Text
+    </div>
+
+    <!-- Header / Navigation -->
+    <header class="bg-white shadow-md sticky top-0 z-20">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+            <div class="text-3xl font-extrabold text-rose-600 tracking-tight">
+                Sizzle & Serve
+            </div>
+            
+            <div class="flex items-center space-x-4">
+                <!-- Voice Control Toggle -->
+                <button id="voice-toggle" onclick="toggleVoice()" class="p-3 rounded-full bg-rose-600 text-white hover:bg-rose-700 transition focus:outline-none focus:ring-4 focus:ring-rose-300 shadow-lg" aria-label="Toggle Voice Control">
+                    <!-- Icon for Microphone -->
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7v0a7 7 0 01-7-7v0"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19v3M4 11a8 8 0 0116 0M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                </button>
+                <span id="voice-status" class="hidden sm:inline text-sm text-gray-600">Voice Control Off</span>
+                
+                <!-- User ID Display (Hidden on extra small screens) -->
+                <p id="user-id-display" class="hidden md:block text-xs text-gray-400 truncate max-w-xs">Initializing...</p>
+
+                <!-- Mobile Cart Button (Visible on mobile) -->
+                <button id="mobile-cart-toggle" onclick="toggleMobileCart()" class="lg:hidden p-3 rounded-full bg-blue-600 text-white hover:bg-blue-700 transition focus:outline-none focus:ring-4 focus:ring-blue-300 shadow-lg relative" aria-label="View Cart">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                    <span id="cart-count-badge" class="hidden absolute top-0 right-0 inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-red-100 transform translate-x-1/2 -translate-y-1/2 bg-red-600 rounded-full">0</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Layout -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:grid lg:grid-cols-3 lg:gap-8">
+
+        <!-- Menu Section (2/3 width on desktop) -->
+        <section class="lg:col-span-2 mb-8 lg:mb-0">
+            <h2 class="text-4xl font-extrabold text-gray-900 mb-6">Today's Menu</h2>
+            
+            <div id="menu-container" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">
+                <!-- Menu Items will be dynamically inserted here -->
+                <p class="text-center text-gray-500 col-span-full py-10">Loading menu...</p>
+            </div>
+        </section>
+
+        <!-- Cart Section (1/3 width on desktop) -->
+        <aside id="cart-container" class="lg:col-span-1 fixed inset-0 lg:sticky lg:top-24 bg-white lg:bg-transparent z-10 p-6 lg:p-0 cart-container-mobile-hidden lg:block transition-transform duration-300 ease-in-out">
+             <!-- Overlay for mobile when cart is open -->
+            <div onclick="toggleMobileCart()" class="absolute inset-0 bg-black opacity-30 lg:hidden"></div>
+
+            <div class="bg-white rounded-xl shadow-2xl p-6 lg:mt-0 relative w-full h-full lg:h-auto overflow-y-auto max-w-md mx-auto lg:max-w-none">
+                
+                <div class="flex justify-between items-center mb-6">
+                    <h3 class="text-2xl font-bold text-gray-900">Your Cart</h3>
+                    <button onclick="toggleMobileCart()" class="lg:hidden text-gray-500 hover:text-gray-700" aria-label="Close Cart">
+                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                
+
+                <!-- Cart Items List -->
+                <div id="cart-items" class="min-h-[100px]">
+                    <p class="text-gray-500 text-center py-4">Your cart is empty.</p>
+                </div>
+
+                <!-- Cart Summary -->
+                <div class="mt-6 pt-4 border-t border-gray-200">
+                    <div class="flex justify-between items-center mb-4">
+                        <span class="text-xl font-bold text-gray-900">Total:</span>
+                        <span id="cart-total" class="text-3xl font-extrabold text-rose-600">₹0.00</span>
+                    </div>
+
+                    <button id="checkout-button" onclick="openPaymentModal()" class="w-full bg-green-600 text-white py-3 rounded-full font-bold text-lg hover:bg-green-700 transition shadow-lg focus:outline-none focus:ring-4 focus:ring-green-500 disabled:opacity-50" disabled>
+                        Proceed to Checkout
+                    </button>
+                    
+                    <button onclick="isFirebaseActive ? clearCart() : clearLocalCart()" class="w-full mt-3 text-rose-600 border border-rose-600 py-2 rounded-full font-semibold hover:bg-rose-50 transition">
+                        Clear Cart
+                    </button>
+                </div>
+            </div>
+        </aside>
+
+    </main>
+    
+    <!-- Payment Modal -->
+    <div id="payment-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 z-30 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="payment-title">
+        <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-sm transform transition-all border-t-8 border-rose-600">
+            <h2 id="payment-title" class="text-3xl font-bold text-center mb-6 text-gray-800">Payment</h2>
+            <p class="text-center text-lg text-gray-600 mb-6">Total payable: <span id="payment-total" class="font-extrabold text-rose-600 text-2xl" data-total="0">₹0.00</span></p>
+
+            <div class="space-y-4">
+                <input type="text" placeholder="Card Number (Dummy)" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-rose-500 focus:border-rose-500 transition">
+                <div class="flex space-x-4">
+                    <input type="text" placeholder="MM/YY" class="w-1/2 p-3 border border-gray-300 rounded-lg focus:ring-rose-500 focus:border-rose-500 transition">
+                    <input type="text" placeholder="CVV" class="w-1/2 p-3 border border-gray-300 rounded-lg focus:ring-rose-500 focus:border-rose-500 transition">
+                </div>
+            </div>
+            
+            <div class="mt-8 space-y-3">
+                <button onclick="processPayment()" class="w-full bg-green-600 text-white py-3 px-6 rounded-full font-bold text-lg hover:bg-green-700 focus:outline-none focus:ring-4 focus:ring-green-500 focus:ring-offset-2 transition shadow-lg">
+                    Confirm & Pay
+                </button>
+                <button onclick="closePaymentModal()" class="w-full bg-gray-200 text-gray-800 py-2 px-4 rounded-full font-semibold hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    
+    <!-- Bill/Receipt Modal -->
+    <div id="bill-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 z-30 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="bill-title">
+        <div class="bg-white p-8 rounded-lg shadow-2xl w-full max-w-xs transform transition-all border-t-8 border-gray-700 font-mono">
+            <h2 id="bill-title" class="text-3xl font-bold text-center mb-4 text-gray-800">Your Receipt</h2>
+            <div id="bill-content" class="text-gray-800 text-sm">
+                <!-- Bill content dynamically generated here -->
+            </div>
+            <div class="mt-6">
+                <button onclick="closeBillModal()" class="w-full bg-rose-600 text-white py-3 px-6 rounded-full font-bold text-lg hover:bg-rose-700 focus:outline-none focus:ring-4 focus:ring-rose-300 focus:ring-offset-2 transition shadow-md">
+                    Done
+                </button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
